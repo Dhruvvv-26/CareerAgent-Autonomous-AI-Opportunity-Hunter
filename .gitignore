@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+env/
+
+# Environment
+.env
+backend/.env
+
+# Gmail credentials
+credentials.json
+token.json
+backend/credentials.json
+backend/token.json
+
+# Database
+*.db
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads
+backend/uploads/
