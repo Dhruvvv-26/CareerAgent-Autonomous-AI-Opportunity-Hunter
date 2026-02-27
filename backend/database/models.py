@@ -24,6 +24,7 @@ class Job(Base):
     date_added = Column(Date, default=date.today)
     source = Column(String(50), default="Unknown")
     job_hash = Column(String(64), unique=True, nullable=False)
+    recruiter_email = Column(Text, default="")  # scraped or manually entered
 
 
 class ResumeProfile(Base):
@@ -35,3 +36,11 @@ class ResumeProfile(Base):
     experience_level = Column(String(50), default="Entry")
     preferred_roles = Column(Text, default="[]")  # JSON string
     uploaded_at = Column(Date, default=date.today)
+
+    # Contact info extracted from resume
+    full_name = Column(Text, default="")
+    phone = Column(Text, default="")
+    email = Column(Text, default="")
+    linkedin_url = Column(Text, default="")
+    github_url = Column(Text, default="")
+    resume_file_path = Column(Text, default="")   # Path to saved PDF

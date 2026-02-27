@@ -3,7 +3,7 @@ import { updateJobStatus } from '../api/api';
 
 const STATUS_OPTIONS = ['Not Applied', 'Applied', 'Interview', 'Rejected', 'Accepted'];
 
-export default function JobRow({ job, onRefresh }) {
+export default function JobRow({ job, onRefresh, onMailClick }) {
     const handleStatusChange = async (e) => {
         const newStatus = e.target.value;
         if (!newStatus) return;
@@ -36,6 +36,17 @@ export default function JobRow({ job, onRefresh }) {
             <td data-label="Status">
                 <StatusBadge status={job.status} />
             </td>
+            <td data-label="Email" className="cell-email">
+                {job.recruiter_email ? (
+                    <span className="email-found" title={job.recruiter_email}>
+                        📧 {job.recruiter_email.length > 20
+                            ? job.recruiter_email.substring(0, 18) + '…'
+                            : job.recruiter_email}
+                    </span>
+                ) : (
+                    <span className="email-missing">—</span>
+                )}
+            </td>
             <td data-label="Update">
                 <select
                     className="status-select"
@@ -48,7 +59,7 @@ export default function JobRow({ job, onRefresh }) {
                     ))}
                 </select>
             </td>
-            <td data-label="Apply">
+            <td data-label="Actions" className="cell-actions">
                 {job.link ? (
                     <a
                         href={job.link}
@@ -61,6 +72,13 @@ export default function JobRow({ job, onRefresh }) {
                 ) : (
                     <span className="no-link-text">—</span>
                 )}
+                <button
+                    className="mail-btn"
+                    onClick={() => onMailClick(job.id)}
+                    title="Send cold email"
+                >
+                    ✉️ Mail
+                </button>
             </td>
         </tr>
     );

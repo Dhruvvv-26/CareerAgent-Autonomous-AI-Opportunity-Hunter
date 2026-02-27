@@ -32,3 +32,25 @@ export async function updateJobStatus(jobId, status) {
     });
     return response.data;
 }
+
+export async function getProfile() {
+    const response = await api.get('/profile');
+    return response.data;
+}
+
+export async function getEmailPreview(jobId) {
+    const response = await api.get(`/email-preview/${jobId}`);
+    return response.data;
+}
+
+export async function sendEmail({ job_id, to, subject, body }) {
+    const response = await api.post('/send-email', { job_id, to, subject, body });
+    return response.data;
+}
+
+export async function updateRecruiterEmail(jobId, email) {
+    const response = await api.put(`/update-recruiter-email/${jobId}`, null, {
+        params: { email },
+    });
+    return response.data;
+}

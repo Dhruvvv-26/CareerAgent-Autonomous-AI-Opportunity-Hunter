@@ -8,12 +8,13 @@
 
 ## ✨ Features
 
-- **Multi-Portal Job Scraping** — Searches Internshala, LinkedIn, Wellfound, Indeed, Naukri, Glassdoor, and SimplyHired
-- **Resume Intelligence** — Extracts skills, domains, experience level, and preferred roles from your PDF resume
+- **Multi-Portal Job Scraping** — Searches 7 portals and concurrently extracts open Recruiter/HR emails
+- **Resume Intelligence** — Extracts skills, domains, and contact info (phone/email/LinkedIn) from your PDF resume
 - **Smart Scoring** — Computes confidence scores using skill matching, domain overlap, and experience fit
+- **Interactive Email Outreach** — Generate, preview, edit, and send polished cold emails with a single click
 - **Auto Categorization** — Jobs classified into High Priority, Good Match, and Stretch tiers
 - **Daily Automation** — APScheduler runs the full pipeline on a configurable daily schedule
-- **Cold Email Agent** — Sends 1 personalized email/day via Gmail API (OAuth Desktop)
+- **Gmail API Integration** — Dispatches cold emails with your custom resume attached via OAuth Desktop
 - **Premium Dark Dashboard** — Clean, minimal React frontend with filters, search, and status tracking
 
 ---
@@ -211,7 +212,7 @@ career_agent/
 │       ├── index.css                # Complete design system
 │       ├── api/
 │       │   └── api.js               # Axios API wrapper
-│       └── components/
+│       ├── components/
 │           ├── Navbar.jsx           # Top navigation bar
 │           ├── ResumeUpload.jsx     # Upload + drag & drop
 │           ├── ResumeSummaryCard.jsx # Skills, domains, experience
@@ -221,6 +222,7 @@ career_agent/
 │           ├── JobTable.jsx         # Job listing table
 │           ├── JobRow.jsx           # Individual job row
 │           ├── StatusBadge.jsx      # Colored status badges
+│           ├── EmailPreviewModal.jsx # Editable email composer modal
 │           └── EmptyState.jsx       # Empty state UI
 ├── .gitignore
 └── README.md

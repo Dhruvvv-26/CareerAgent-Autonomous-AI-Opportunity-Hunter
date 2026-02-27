@@ -12,6 +12,9 @@ export default defineConfig({
             '/job-stats': 'http://localhost:8000',
             '/profile': 'http://localhost:8000',
             '/update-status': 'http://localhost:8000',
+            '/update-recruiter-email': 'http://localhost:8000',
+            '/email-preview': 'http://localhost:8000',
+            '/send-email': 'http://localhost:8000',
         },
     },
 })

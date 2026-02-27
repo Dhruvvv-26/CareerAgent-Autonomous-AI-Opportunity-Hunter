@@ -1,7 +1,7 @@
 import JobRow from './JobRow';
 import EmptyState from './EmptyState';
 
-export default function JobTable({ jobs, onRefresh }) {
+export default function JobTable({ jobs, onRefresh, onMailClick }) {
     if (jobs.length === 0) {
         return <EmptyState />;
     }
@@ -18,13 +18,19 @@ export default function JobTable({ jobs, onRefresh }) {
                         <th>Confidence</th>
                         <th>Reputation</th>
                         <th>Status</th>
+                        <th>Email</th>
                         <th>Update</th>
-                        <th>Apply</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {jobs.map((job) => (
-                        <JobRow key={job.id} job={job} onRefresh={onRefresh} />
+                        <JobRow
+                            key={job.id}
+                            job={job}
+                            onRefresh={onRefresh}
+                            onMailClick={onMailClick}
+                        />
                     ))}
                 </tbody>
             </table>

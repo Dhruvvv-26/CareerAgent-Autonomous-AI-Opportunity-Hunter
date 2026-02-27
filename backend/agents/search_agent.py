@@ -2,12 +2,15 @@
 Search Agent — scrapes job listings from 7 portals:
   Internshala, Wellfound, Indeed, LinkedIn, Naukri, Glassdoor, SimplyHired.
 Uses requests + BeautifulSoup. Generates SHA256 hash for deduplication.
+Also scrapes recruiter/HR email addresses from individual job pages.
 """
 
 import hashlib
 import logging
+import re
 from datetime import date
 from urllib.parse import quote_plus
+import concurrent.futures
 
 import requests
 from bs4 import BeautifulSoup
@@ -23,7 +26,8 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
 }
-TIMEOUT = 15
+TIMEOUT = 12
+TIMEOUT_EMAIL_SCRAPE = 4
 
 
 def _generate_hash(company: str, role: str, link: str) -> str:
@@ -35,6 +39,85 @@ def _generate_hash(company: str, role: str, link: str) -> str:
 def _job_exists(db: Session, job_hash: str) -> bool:
     """Check if a job with this hash already exists in the database."""
     return db.query(Job).filter(Job.job_hash == job_hash).first() is not None
+
+
+# ---------------------------------------------------------------------------
+# Recruiter email scraper — visits individual job pages
+# ---------------------------------------------------------------------------
+GENERIC_EMAILS = {
+    "noreply", "no-reply", "info", "support", "admin", "contact",
+    "help", "feedback", "careers", "jobs", "hr", "hello", "team",
+    "sales", "marketing", "webmaster", "postmaster", "mail",
+    "privacy", "legal", "billing", "accounts",
+}
+
+# Domains to exclude (job portal system emails)
+EXCLUDED_DOMAINS = {
+    "internshala.com", "linkedin.com", "indeed.com", "naukri.com",
+    "glassdoor.com", "glassdoor.co.in", "simplyhired.com",
+    "simplyhired.co.in", "wellfound.com", "angellist.com",
+    "google.com", "facebook.com", "twitter.com", "instagram.com",
+    "example.com", "sentry.io", "github.com", "w3.org",
+}
+
+
+def _extract_emails_from_text(text: str) -> list[str]:
+    """Find all email addresses in text, filter out generic/system ones."""
+    pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
+    raw_emails = re.findall(pattern, text)
+
+    valid = []
+    for email in raw_emails:
+        email_lower = email.lower()
+        local_part = email_lower.split("@")[0]
+        domain = email_lower.split("@")[1] if "@" in email_lower else ""
+
+        # Skip generic/system emails
+        if local_part in GENERIC_EMAILS:
+            continue
+        if domain in EXCLUDED_DOMAINS:
+            continue
+        # Skip image/file extensions sometimes caught by regex
+        if domain.endswith((".png", ".jpg", ".gif", ".svg", ".css", ".js")):
+            continue
+
+        valid.append(email_lower)
+
+    return list(dict.fromkeys(valid))  # dedupe preserving order
+
+
+def _scrape_recruiter_email(job_url: str, source: str) -> str:
+    """
+    Visit a job detail page and try to extract a recruiter/HR email.
+    Returns the best email found, or empty string.
+    """
+    if not job_url or not job_url.startswith("http"):
+        return ""
+
+    try:
+        resp = requests.get(job_url, headers=HEADERS, timeout=TIMEOUT_EMAIL_SCRAPE)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        page_text = soup.get_text(separator=" ")
+
+        emails = _extract_emails_from_text(page_text)
+
+        # Also check mailto: links which are the most reliable source
+        for a_tag in soup.select("a[href^='mailto:']"):
+            href = a_tag.get("href", "")
+            if href.startswith("mailto:"):
+                mailto_email = href[7:].split("?")[0].strip().lower()
+                if mailto_email and mailto_email not in emails:
+                    emails.insert(0, mailto_email)  # prioritize mailto
+
+        if emails:
+            logger.info(f"Found recruiter email(s) on {source}: {emails[0]}")
+            return emails[0]
+
+    except Exception as e:
+        logger.debug(f"Failed to scrape email from {job_url}: {e}")
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +153,12 @@ def _scrape_internshala(keywords: list[str]) -> list[dict]:
                     href = link_tag["href"]
                     link = href if href.startswith("http") else f"https://internshala.com{href}"
 
+                # Try to get recruiter email from the listing itself
+                recruiter_email = ""
+                email_tags = listing.select("a[href^='mailto:']")
+                if email_tags:
+                    recruiter_email = email_tags[0].get("href", "")[7:].split("?")[0].strip()
+
                 jobs.append({
                     "company": company,
                     "role": role,
@@ -79,6 +168,7 @@ def _scrape_internshala(keywords: list[str]) -> list[dict]:
                     "deadline": "N/A",
                     "link": link,
                     "source": "Internshala",
+                    "recruiter_email": recruiter_email,
                 })
             except Exception as e:
                 logger.debug(f"Internshala listing parse error: {e}")
@@ -131,6 +221,7 @@ def _scrape_wellfound(keywords: list[str]) -> list[dict]:
                     "deadline": "N/A",
                     "link": link,
                     "source": "Wellfound",
+                    "recruiter_email": "",
                 })
             except Exception as e:
                 logger.debug(f"Wellfound listing parse error: {e}")
@@ -183,6 +274,7 @@ def _scrape_indeed(keywords: list[str]) -> list[dict]:
                     "deadline": "N/A",
                     "link": link,
                     "source": "Indeed",
+                    "recruiter_email": "",
                 })
             except Exception as e:
                 logger.debug(f"Indeed listing parse error: {e}")
@@ -232,6 +324,7 @@ def _scrape_linkedin(keywords: list[str]) -> list[dict]:
                     "deadline": "N/A",
                     "link": link,
                     "source": "LinkedIn",
+                    "recruiter_email": "",
                 })
             except Exception as e:
                 logger.debug(f"LinkedIn listing parse error: {e}")
@@ -285,6 +378,7 @@ def _scrape_naukri(keywords: list[str]) -> list[dict]:
                     "deadline": "N/A",
                     "link": link,
                     "source": "Naukri",
+                    "recruiter_email": "",
                 })
             except Exception as e:
                 logger.debug(f"Naukri listing parse error: {e}")
@@ -337,6 +431,7 @@ def _scrape_glassdoor(keywords: list[str]) -> list[dict]:
                     "deadline": "N/A",
                     "link": link,
                     "source": "Glassdoor",
+                    "recruiter_email": "",
                 })
             except Exception as e:
                 logger.debug(f"Glassdoor listing parse error: {e}")
@@ -389,6 +484,7 @@ def _scrape_simplyhired(keywords: list[str]) -> list[dict]:
                     "deadline": "N/A",
                     "link": link,
                     "source": "SimplyHired",
+                    "recruiter_email": "",
                 })
             except Exception as e:
                 logger.debug(f"SimplyHired listing parse error: {e}")
@@ -402,14 +498,51 @@ def _scrape_simplyhired(keywords: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+def _build_search_keywords(profile: dict) -> list[str]:
+    """
+    Build effective search keywords from the resume profile.
+    Prioritizes preferred roles and domains over raw skill names,
+    since job portals respond much better to role-based queries.
+    """
+    keywords = []
+
+    # 1. Preferred roles are the best search terms (e.g. "software engineer")
+    roles = profile.get("preferred_roles", [])
+    for role in roles[:3]:
+        keywords.append(role)
+
+    # 2. Domains add context (e.g. "machine learning", "web development")
+    domains = profile.get("domains", [])
+    for domain in domains[:2]:
+        keywords.append(domain)
+
+    # 3. Fall back to top skills if we have nothing else
+    if not keywords:
+        skills = profile.get("skills", [])
+        # Pick high-value skills (frameworks/languages, not generic ones)
+        priority_skills = [s for s in skills if s in {
+            "python", "java", "javascript", "react", "node.js", "django",
+            "flask", "fastapi", "spring", "machine learning", "deep learning",
+            "docker", "kubernetes", "aws", "data science", "typescript",
+            "go", "rust", "angular", "vue", "next.js", "pytorch", "tensorflow",
+        }]
+        keywords = priority_skills[:4] if priority_skills else skills[:3]
+
+    # 4. Ultimate fallback
+    if not keywords:
+        keywords = ["software engineer"]
+
+    return keywords
+
+
 def search_jobs(profile: dict, db: Session) -> list[dict]:
     """
     Search all 7 sources for jobs matching the user's profile.
+    Builds smart search keywords from roles and domains.
     Deduplicates against the database. Returns newly added jobs.
     """
-    keywords = profile.get("skills", [])[:5]
-    if not keywords:
-        keywords = profile.get("preferred_roles", ["software engineer"])
+    keywords = _build_search_keywords(profile)
+    logger.info(f"Search keywords from resume: {keywords}")
 
     all_raw: list[dict] = []
 
@@ -432,7 +565,8 @@ def search_jobs(profile: dict, db: Session) -> list[dict]:
         except Exception as e:
             logger.warning(f"{name} scraper crashed: {e}")
 
-    new_jobs = []
+    # Step 1: Filter to only new jobs that aren't already in DB
+    new_jobs_to_scrape = []
     seen_hashes = set()
     for raw in all_raw:
         job_hash = _generate_hash(raw["company"], raw["role"], raw.get("link", ""))
@@ -441,7 +575,23 @@ def search_jobs(profile: dict, db: Session) -> list[dict]:
         seen_hashes.add(job_hash)
         if _job_exists(db, job_hash):
             continue
+        new_jobs_to_scrape.append((raw, job_hash))
 
+    # Step 2: Concurrently scrape recruiter emails for the new jobs
+    def fetch_email(item):
+        raw_job, j_hash = item
+        rec_email = raw_job.get("recruiter_email", "")
+        if not rec_email and raw_job.get("link"):
+            rec_email = _scrape_recruiter_email(raw_job["link"], raw_job.get("source", "Unknown"))
+        return raw_job, j_hash, rec_email
+
+    new_jobs = []
+    logger.info(f"Concurrently scraping recruiter emails for {len(new_jobs_to_scrape)} new jobs...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(fetch_email, new_jobs_to_scrape))
+
+    # Step 3: Save them to DB
+    for raw, job_hash, recruiter_email in results:
         job = Job(
             company=raw["company"],
             role=raw["role"],
@@ -456,6 +606,7 @@ def search_jobs(profile: dict, db: Session) -> list[dict]:
             date_added=date.today(),
             source=raw.get("source", "Unknown"),
             job_hash=job_hash,
+            recruiter_email=recruiter_email,
         )
         db.add(job)
         new_jobs.append(raw)

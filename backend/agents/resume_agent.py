@@ -1,9 +1,10 @@
 """
-Resume Agent — extracts skills and structured information from a PDF resume.
-Uses PyMuPDF for text extraction and keyword matching for skill detection.
+Resume Agent — extracts skills, contact info, and structured information from a PDF resume.
+Uses PyMuPDF for text extraction, keyword matching for skills, and regex for contact info.
 """
 
 import json
+import re
 import fitz  # PyMuPDF
 
 
@@ -121,6 +122,79 @@ def detect_preferred_roles(text: str) -> list[str]:
     return roles if roles else ["Software Engineer"]
 
 
+# ---------------------------------------------------------------------------
+# Contact info extraction
+# ---------------------------------------------------------------------------
+def extract_contact_info(text: str) -> dict:
+    """
+    Extract personal contact details from resume text using regex.
+    Returns: {full_name, email, phone, linkedin_url, github_url}
+    """
+    result = {
+        "full_name": "",
+        "email": "",
+        "phone": "",
+        "linkedin_url": "",
+        "github_url": "",
+    }
+
+    # --- Email ---
+    email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
+    emails = re.findall(email_pattern, text)
+    if emails:
+        result["email"] = emails[0]
+
+    # --- Phone (Indian & international) ---
+    phone_patterns = [
+        r'(?:\+91[\s\-]?)?[6-9]\d{4}[\s\-]?\d{5}',    # Indian: +91 98765 43210
+        r'(?:\+91[\s\-]?)?\d{10}',                       # 10-digit
+        r'(?:\+\d{1,3}[\s\-]?)?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}',  # International
+    ]
+    for pattern in phone_patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            phone = matches[0].strip()
+            # Only accept if it looks like a phone (7+ digits)
+            digits = re.sub(r'\D', '', phone)
+            if len(digits) >= 10:
+                result["phone"] = phone
+                break
+
+    # --- LinkedIn URL ---
+    linkedin_pattern = r'(?:https?://)?(?:www\.)?linkedin\.com/in/[a-zA-Z0-9_\-/]+'
+    linkedin_matches = re.findall(linkedin_pattern, text, re.IGNORECASE)
+    if linkedin_matches:
+        url = linkedin_matches[0]
+        if not url.startswith("http"):
+            url = "https://" + url
+        result["linkedin_url"] = url
+
+    # --- GitHub URL ---
+    github_pattern = r'(?:https?://)?(?:www\.)?github\.com/[a-zA-Z0-9_\-]+'
+    github_matches = re.findall(github_pattern, text, re.IGNORECASE)
+    if github_matches:
+        url = github_matches[0]
+        if not url.startswith("http"):
+            url = "https://" + url
+        result["github_url"] = url
+
+    # --- Full Name (heuristic: first non-empty line that isn't an email/URL/phone) ---
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    for line in lines[:5]:  # Check first 5 lines
+        # Skip if it's an email, URL, or phone
+        if "@" in line or "http" in line or "linkedin" in line.lower():
+            continue
+        if re.match(r'^[\+\d\s\-\(\)]{10,}$', line):  # Skip phone lines
+            continue
+        # Likely a name if it's short-ish and mostly alpha
+        cleaned = re.sub(r'[^a-zA-Z\s]', '', line).strip()
+        if cleaned and len(cleaned.split()) <= 5 and len(cleaned) <= 60:
+            result["full_name"] = cleaned
+            break
+
+    return result
+
+
 def parse_resume(file_bytes: bytes) -> dict:
     """
     Main entry point: parse a PDF resume and return structured JSON.
@@ -129,7 +203,14 @@ def parse_resume(file_bytes: bytes) -> dict:
             "skills": [...],
             "domains": [...],
             "experience_level": "...",
-            "preferred_roles": [...]
+            "preferred_roles": [...],
+            "contact_info": {
+                "full_name": "...",
+                "email": "...",
+                "phone": "...",
+                "linkedin_url": "...",
+                "github_url": "...",
+            }
         }
     """
     text = extract_text_from_pdf(file_bytes)
@@ -137,10 +218,12 @@ def parse_resume(file_bytes: bytes) -> dict:
     domains = detect_domains(skills)
     experience_level = detect_experience_level(text)
     preferred_roles = detect_preferred_roles(text)
+    contact_info = extract_contact_info(text)
 
     return {
         "skills": skills,
         "domains": domains,
         "experience_level": experience_level,
         "preferred_roles": preferred_roles,
+        "contact_info": contact_info,
     }

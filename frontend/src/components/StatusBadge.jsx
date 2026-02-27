@@ -7,7 +7,7 @@ export default function StatusBadge({ status }) {
         'Interview': 'status-interview',
         'Rejected': 'status-rejected',
         'Accepted': 'status-accepted',
-        'Emailed': 'status-applied',
+        'Emailed': 'status-emailed',
         'New': 'status-not-applied',
         'Not Applied': 'status-not-applied',
     };

@@ -49,15 +49,18 @@ def _categorize(confidence: float) -> str:
 
 def score_jobs(profile: dict, db: Session) -> int:
     """
-    Score all unscored (New) jobs in the database against the profile.
-    Updates confidence_score, reputation_score, and status fields.
+    Score ALL jobs in the database against the current profile.
+    Re-scores on every run so the dashboard always reflects the latest resume.
+    Preserves manually set statuses (Applied, Interview, Rejected, Accepted, Emailed).
     Returns number of jobs scored.
     """
+    MANUAL_STATUSES = {"Applied", "Interview", "Rejected", "Accepted", "Emailed", "Not Applied"}
+
     user_skills = [s.lower() for s in profile.get("skills", [])]
     user_domains = profile.get("domains", [])
     experience_level = profile.get("experience_level", "Entry")
 
-    jobs = db.query(Job).filter(Job.status == "New").all()
+    jobs = db.query(Job).all()
     scored_count = 0
 
     for job in jobs:
@@ -78,14 +81,17 @@ def score_jobs(profile: dict, db: Session) -> int:
         # Reputation
         reputation = get_reputation_score(job.company)
 
-        # Category
-        category = _categorize(confidence)
-
+        # Update scores always
         job.confidence_score = round(confidence, 2)
         job.reputation_score = round(reputation, 2)
-        job.status = category
+
+        # Only update category if the status hasn't been manually changed
+        if job.status not in MANUAL_STATUSES:
+            job.status = _categorize(confidence)
+
         scored_count += 1
 
     db.commit()
     logger.info(f"Scored {scored_count} jobs.")
     return scored_count
+

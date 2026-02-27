@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { getJobs, runSearch } from '../api/api';
+import { getJobs, runSearch, getEmailPreview } from '../api/api';
 import CategoryTabs from './CategoryTabs';
 import FilterBar from './FilterBar';
 import JobTable from './JobTable';
+import EmailPreviewModal from './EmailPreviewModal';
 
 export default function Dashboard() {
     const [jobs, setJobs] = useState([]);
@@ -13,6 +14,10 @@ export default function Dashboard() {
     const [loading, setLoading] = useState(false);
     const [resultMsg, setResultMsg] = useState('');
     const [resultType, setResultType] = useState('');
+
+    // Email preview modal
+    const [emailPreview, setEmailPreview] = useState(null);
+    const [loadingPreview, setLoadingPreview] = useState(false);
 
     const fetchJobs = useCallback(async () => {
         setLoading(true);
@@ -48,6 +53,24 @@ export default function Dashboard() {
             setResultType('error');
         } finally {
             setSearching(false);
+        }
+    };
+
+    const handleMailClick = async (jobId) => {
+        setLoadingPreview(true);
+        try {
+            const data = await getEmailPreview(jobId);
+            if (data.error) {
+                setResultMsg(data.error);
+                setResultType('error');
+            } else {
+                setEmailPreview(data);
+            }
+        } catch {
+            setResultMsg('Failed to load email preview.');
+            setResultType('error');
+        } finally {
+            setLoadingPreview(false);
         }
     };
 
@@ -118,12 +141,28 @@ export default function Dashboard() {
                     onSearchChange={setSearch}
                 />
 
+                {loadingPreview && (
+                    <div className="result-banner success">Loading email preview…</div>
+                )}
+
                 {loading ? (
                     <div className="spinner center"></div>
                 ) : (
-                    <JobTable jobs={filteredJobs} onRefresh={fetchJobs} />
+                    <JobTable
+                        jobs={filteredJobs}
+                        onRefresh={fetchJobs}
+                        onMailClick={handleMailClick}
+                    />
                 )}
             </div>
+
+            {emailPreview && (
+                <EmailPreviewModal
+                    preview={emailPreview}
+                    onClose={() => setEmailPreview(null)}
+                    onSent={fetchJobs}
+                />
+            )}
         </div>
     );
 }
