@@ -26,7 +26,7 @@ node_modules/
 frontend/node_modules/
 
 # IDE
-.vscode/
+# .vscode/ (uncommented to allow settings)
 .idea/
 
 # OS
