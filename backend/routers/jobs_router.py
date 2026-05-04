@@ -1,15 +1,20 @@
 """
-Jobs Router — search, list, filter, stats, update statuses, email preview & send.
+Jobs Router — search, list, filter, stats, update statuses, email preview & send,
+export CSV, delete/archive, bookmarks, status history, and email logs.
 """
 
+import csv
+import io
 import json
+from datetime import datetime
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database.db import get_db
-from database.models import Job, ResumeProfile
+from database.models import Job, ResumeProfile, JobStatusHistory, EmailLog
 from agents.search_agent import search_jobs
 from agents.scoring_agent import score_jobs
 from agents.email_agent import send_cold_email, get_email_preview
@@ -54,61 +59,106 @@ def run_search(db: Session = Depends(get_db)):
 def get_jobs(
     category: str = Query(None, description="Filter by category"),
     source: str = Query(None, description="Filter by source portal"),
+    bookmarked: bool = Query(None, description="Filter bookmarked jobs"),
+    show_archived: bool = Query(False, description="Include archived jobs"),
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(50, ge=1, le=200, description="Items per page"),
     db: Session = Depends(get_db),
 ):
-    """Return all jobs with recruiter email info."""
+    """Return paginated jobs with recruiter email info."""
     query = db.query(Job)
+
+    if not show_archived:
+        query = query.filter(Job.archived == False)
     if category:
         query = query.filter(Job.status == category)
     if source:
         query = query.filter(Job.source == source)
+    if bookmarked is not None:
+        query = query.filter(Job.bookmarked == bookmarked)
 
-    jobs = query.order_by(Job.confidence_score.desc()).all()
+    total = query.count()
+    total_pages = max(1, (total + per_page - 1) // per_page)
 
-    return [
-        {
-            "id": job.id,
-            "company": job.company,
-            "role": job.role,
-            "location": job.location,
-            "stipend": job.stipend,
-            "required_skills": job.required_skills,
-            "deadline": job.deadline,
-            "link": job.link,
-            "confidence_score": job.confidence_score,
-            "reputation_score": job.reputation_score,
-            "status": job.status,
-            "source": job.source or "Unknown",
-            "date_added": str(job.date_added),
-            "recruiter_email": job.recruiter_email or "",
-        }
-        for job in jobs
-    ]
+    jobs = (
+        query.order_by(Job.confidence_score.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+
+    return {
+        "jobs": [
+            {
+                "id": job.id,
+                "company": job.company,
+                "role": job.role,
+                "location": job.location,
+                "stipend": job.stipend,
+                "required_skills": job.required_skills,
+                "job_description": job.job_description or "",
+                "deadline": job.deadline,
+                "link": job.link,
+                "confidence_score": job.confidence_score,
+                "reputation_score": job.reputation_score,
+                "status": job.status,
+                "source": job.source or "Unknown",
+                "date_added": str(job.date_added),
+                "recruiter_email": job.recruiter_email or "",
+                "bookmarked": job.bookmarked,
+                "archived": job.archived,
+            }
+            for job in jobs
+        ],
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": total_pages,
+        },
+    }
 
 
 @router.get("/job-stats")
 def get_job_stats(db: Session = Depends(get_db)):
     """Return aggregate counts for dashboard filter badges."""
+    base = db.query(Job).filter(Job.archived == False)
+
     category_counts_raw = (
-        db.query(Job.status, func.count(Job.id))
+        base.with_entities(Job.status, func.count(Job.id))
         .group_by(Job.status)
         .all()
     )
     category_counts = {status: count for status, count in category_counts_raw}
 
     source_counts_raw = (
-        db.query(Job.source, func.count(Job.id))
+        base.with_entities(Job.source, func.count(Job.id))
         .group_by(Job.source)
         .all()
     )
     source_counts = {source or "Unknown": count for source, count in source_counts_raw}
 
-    total = db.query(func.count(Job.id)).scalar() or 0
+    # Daily trend — jobs added per day (last 30 entries)
+    daily_trend_raw = (
+        db.query(Job.date_added, func.count(Job.id))
+        .group_by(Job.date_added)
+        .order_by(Job.date_added.desc())
+        .limit(30)
+        .all()
+    )
+    daily_trend = [
+        {"date": str(d), "count": c} for d, c in reversed(daily_trend_raw)
+    ]
+
+    total = base.count()
+    bookmarked_count = base.filter(Job.bookmarked == True).count()
 
     return {
         "total": total,
+        "bookmarked": bookmarked_count,
         "by_category": category_counts,
         "by_source": source_counts,
+        "daily_trend": daily_trend,
     }
 
 
@@ -138,10 +188,21 @@ def get_profile(db: Session = Depends(get_db)):
 
 @router.put("/update-status/{job_id}")
 def update_status(job_id: int, status: str = Query(...), db: Session = Depends(get_db)):
-    """Update the status of a specific job."""
+    """Update the status of a specific job and record in history."""
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         return {"error": "Job not found."}
+
+    old_status = job.status
+
+    # Record status change history
+    history = JobStatusHistory(
+        job_id=job.id,
+        old_status=old_status,
+        new_status=status,
+        changed_at=datetime.utcnow(),
+    )
+    db.add(history)
 
     job.status = status
     db.commit()
@@ -166,6 +227,148 @@ def update_recruiter_email(
     return {"message": f"Recruiter email for job {job_id} updated to '{email}'."}
 
 
+# ---------------------------------------------------------------------------
+# Bookmark endpoints
+# ---------------------------------------------------------------------------
+@router.put("/toggle-bookmark/{job_id}")
+def toggle_bookmark(job_id: int, db: Session = Depends(get_db)):
+    """Toggle the bookmarked state of a job."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        return {"error": "Job not found."}
+
+    job.bookmarked = not job.bookmarked
+    db.commit()
+
+    return {
+        "message": f"Job {job_id} {'bookmarked' if job.bookmarked else 'unbookmarked'}.",
+        "bookmarked": job.bookmarked,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Delete / Archive endpoints
+# ---------------------------------------------------------------------------
+@router.put("/archive-job/{job_id}")
+def archive_job(job_id: int, db: Session = Depends(get_db)):
+    """Archive (soft-delete) a job."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        return {"error": "Job not found."}
+
+    job.archived = not job.archived
+    db.commit()
+
+    return {
+        "message": f"Job {job_id} {'archived' if job.archived else 'restored'}.",
+        "archived": job.archived,
+    }
+
+
+@router.delete("/delete-job/{job_id}")
+def delete_job(job_id: int, db: Session = Depends(get_db)):
+    """Permanently delete a job."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        return {"error": "Job not found."}
+
+    db.delete(job)
+    db.commit()
+
+    return {"message": f"Job {job_id} permanently deleted."}
+
+
+# ---------------------------------------------------------------------------
+# Status History
+# ---------------------------------------------------------------------------
+@router.get("/status-history/{job_id}")
+def get_status_history(job_id: int, db: Session = Depends(get_db)):
+    """Get the status change history for a specific job."""
+    history = (
+        db.query(JobStatusHistory)
+        .filter(JobStatusHistory.job_id == job_id)
+        .order_by(JobStatusHistory.changed_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": h.id,
+            "old_status": h.old_status,
+            "new_status": h.new_status,
+            "changed_at": h.changed_at.isoformat() if h.changed_at else "",
+        }
+        for h in history
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Email History
+# ---------------------------------------------------------------------------
+@router.get("/email-history/{job_id}")
+def get_email_history(job_id: int, db: Session = Depends(get_db)):
+    """Get the email send history for a specific job."""
+    logs = (
+        db.query(EmailLog)
+        .filter(EmailLog.job_id == job_id)
+        .order_by(EmailLog.sent_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": log.id,
+            "to_email": log.to_email,
+            "subject": log.subject,
+            "sent_at": log.sent_at.isoformat() if log.sent_at else "",
+            "status": log.status,
+        }
+        for log in logs
+    ]
+
+
+# ---------------------------------------------------------------------------
+# CSV Export
+# ---------------------------------------------------------------------------
+@router.get("/export-jobs")
+def export_jobs_csv(db: Session = Depends(get_db)):
+    """Export all non-archived jobs as a CSV file."""
+    jobs = (
+        db.query(Job)
+        .filter(Job.archived == False)
+        .order_by(Job.confidence_score.desc())
+        .all()
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header row
+    writer.writerow([
+        "ID", "Company", "Role", "Location", "Stipend",
+        "Confidence %", "Reputation", "Status", "Source",
+        "Date Added", "Link", "Recruiter Email", "Bookmarked",
+    ])
+
+    for job in jobs:
+        writer.writerow([
+            job.id, job.company, job.role, job.location, job.stipend,
+            job.confidence_score, job.reputation_score, job.status,
+            job.source or "Unknown", str(job.date_added),
+            job.link, job.recruiter_email or "", "Yes" if job.bookmarked else "No",
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=career_agent_jobs.csv"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Email Preview & Send
+# ---------------------------------------------------------------------------
 @router.get("/email-preview/{job_id}")
 def email_preview(job_id: int, db: Session = Depends(get_db)):
     """
@@ -191,6 +394,7 @@ def trigger_send_email(req: SendEmailRequest = None, db: Session = Depends(get_d
     """
     Send a cold email for a specific job.
     Accepts optional overrides for to, subject, body from the preview editor.
+    Logs the email in EmailLog.
     """
     profile = _get_profile(db)
     if not profile:
@@ -207,5 +411,17 @@ def trigger_send_email(req: SendEmailRequest = None, db: Session = Depends(get_d
         )
     else:
         result = send_cold_email(db=db, profile=profile)
+
+    # Log the email if it was sent successfully
+    if result.get("status") == "sent":
+        email_log = EmailLog(
+            job_id=req.job_id if req else 0,
+            to_email=result.get("to", ""),
+            subject=result.get("subject", ""),
+            sent_at=datetime.utcnow(),
+            status="sent",
+        )
+        db.add(email_log)
+        db.commit()
 
     return result

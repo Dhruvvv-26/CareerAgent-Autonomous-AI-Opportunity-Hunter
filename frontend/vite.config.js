@@ -15,6 +15,12 @@ export default defineConfig({
             '/update-recruiter-email': 'http://localhost:8000',
             '/email-preview': 'http://localhost:8000',
             '/send-email': 'http://localhost:8000',
+            '/toggle-bookmark': 'http://localhost:8000',
+            '/archive-job': 'http://localhost:8000',
+            '/delete-job': 'http://localhost:8000',
+            '/status-history': 'http://localhost:8000',
+            '/email-history': 'http://localhost:8000',
+            '/export-jobs': 'http://localhost:8000',
         },
     },
 })

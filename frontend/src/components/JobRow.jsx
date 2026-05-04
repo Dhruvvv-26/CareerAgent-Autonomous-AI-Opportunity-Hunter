@@ -1,85 +1,111 @@
-import StatusBadge from './StatusBadge';
-import { updateJobStatus } from '../api/api';
+import { updateJobStatus, toggleBookmark, archiveJob } from '../api/api';
 
-const STATUS_OPTIONS = ['Not Applied', 'Applied', 'Interview', 'Rejected', 'Accepted'];
-
-export default function JobRow({ job, onRefresh, onMailClick }) {
+export default function JobCard({ job, onRefresh, onMailClick }) {
     const handleStatusChange = async (e) => {
-        const newStatus = e.target.value;
-        if (!newStatus) return;
         try {
-            await updateJobStatus(job.id, newStatus);
+            await updateJobStatus(job.id, e.target.value);
             onRefresh();
         } catch {
-            // silent fail
+            alert('Failed to update status');
         }
     };
 
-    const getConfidenceClass = (score) => {
-        if (score >= 80) return 'confidence-green';
-        if (score >= 60) return 'confidence-blue';
-        return 'confidence-yellow';
+    const handleToggleBookmark = async () => {
+        try {
+            await toggleBookmark(job.id);
+            onRefresh();
+        } catch {
+            // ignore
+        }
     };
 
+    const handleArchive = async () => {
+        try {
+            await archiveJob(job.id);
+            onRefresh();
+        } catch {
+            // ignore
+        }
+    };
+
+    const skills = (job.required_skills || '').split(',').map(s => s.trim()).filter(Boolean);
+    const companyInitial = job.company ? job.company.charAt(0).toUpperCase() : '?';
+
     return (
-        <tr>
-            <td data-label="Company" className="cell-company">{job.company}</td>
-            <td data-label="Role" className="cell-role">{job.role}</td>
-            <td data-label="Location">{job.location}</td>
-            <td data-label="Stipend">{job.stipend}</td>
-            <td data-label="Confidence">
-                <span className={`confidence-badge ${getConfidenceClass(job.confidence_score)}`}>
-                    {job.confidence_score.toFixed(0)}%
-                </span>
-            </td>
-            <td data-label="Reputation">{job.reputation_score.toFixed(0)}</td>
-            <td data-label="Status">
-                <StatusBadge status={job.status} />
-            </td>
-            <td data-label="Email" className="cell-email">
-                {job.recruiter_email ? (
-                    <span className="email-found" title={job.recruiter_email}>
-                        📧 {job.recruiter_email.length > 20
-                            ? job.recruiter_email.substring(0, 18) + '…'
-                            : job.recruiter_email}
-                    </span>
-                ) : (
-                    <span className="email-missing">—</span>
-                )}
-            </td>
-            <td data-label="Update">
-                <select
-                    className="status-select"
-                    defaultValue=""
-                    onChange={handleStatusChange}
-                >
-                    <option value="" disabled>Change…</option>
-                    {STATUS_OPTIONS.map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                    ))}
-                </select>
-            </td>
-            <td data-label="Actions" className="cell-actions">
-                {job.link ? (
-                    <a
-                        href={job.link}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="apply-btn"
+        <div className="job-card">
+            <div className="job-card-header">
+                <div className="company-box">
+                    <div className="company-logo">{companyInitial}</div>
+                    <div className="job-info">
+                        <h3>{job.role}</h3>
+                        <div className="company-name">
+                            {job.company} 
+                            <span className="verified-badge">✓ Verified</span>
+                        </div>
+                    </div>
+                </div>
+                <button className="arrow-btn" title="View Details">↗</button>
+            </div>
+
+            <div className="badge-row">
+                <span className="pill pill-accent">{job.source || 'Direct'}</span>
+                <span className="pill">{job.location || 'Remote'}</span>
+            </div>
+
+            <div className="tag-row">
+                {skills.slice(0, 4).map((skill, idx) => (
+                    <span key={idx} className="tag">{skill}</span>
+                ))}
+                {skills.length > 4 && <span className="tag">+{skills.length - 4}</span>}
+            </div>
+
+            <div className="job-location">
+                📍 {job.location || 'India'} • {job.date_added || 'Recently'}
+            </div>
+
+            <div className="job-card-footer">
+                <div className="salary">
+                    {job.stipend && job.stipend !== 'Not disclosed' ? job.stipend : 'Competitive'}
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                    <button 
+                        className={`nav-item ${job.is_bookmarked ? 'active' : ''}`} 
+                        onClick={handleToggleBookmark}
+                        style={{ background: 'none', border: 'none', fontSize: '1.2rem', padding: 0, width: 'auto', height: 'auto' }}
                     >
-                        Apply
-                    </a>
-                ) : (
-                    <span className="no-link-text">—</span>
-                )}
-                <button
-                    className="mail-btn"
-                    onClick={() => onMailClick(job.id)}
-                    title="Send cold email"
+                        {job.is_bookmarked ? '★' : '☆'}
+                    </button>
+                    <button className="mail-btn" onClick={() => onMailClick(job.id)}>
+                        ✉️ Mail
+                    </button>
+                    {job.link ? (
+                        <a href={job.link} target="_blank" rel="noopener noreferrer" className="apply-btn-card">
+                            Apply
+                        </a>
+                    ) : (
+                        <button className="apply-btn-card" disabled>No Link</button>
+                    )}
+                </div>
+            </div>
+
+            <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <select className="status-select" value={job.status} onChange={handleStatusChange}>
+                    <option value="New">New</option>
+                    <option value="High Priority">High Priority</option>
+                    <option value="Good Match">Good Match</option>
+                    <option value="Stretch">Stretch</option>
+                    <option value="Applied">Applied</option>
+                    <option value="Interview">Interview</option>
+                    <option value="Rejected">Rejected</option>
+                    <option value="Accepted">Accepted</option>
+                </select>
+                <button 
+                    onClick={handleArchive} 
+                    style={{ background: 'none', border: 'none', color: '#ff4444', fontSize: '0.8rem', cursor: 'pointer' }}
                 >
-                    ✉️ Mail
+                    Archive
                 </button>
-            </td>
-        </tr>
+            </div>
+        </div>
     );
 }

@@ -48,7 +48,7 @@ def _daily_job():
         logger.info(f"Scored {scored} jobs.")
 
         # Step 3: Send 1 cold email
-        result = send_cold_email(profile, db)
+        result = send_cold_email(db=db, profile=profile)
         logger.info(f"Email result: {result}")
 
     except Exception as e:

@@ -1,13 +1,16 @@
 """
-Search Agent — scrapes job listings from 7 portals:
-  Internshala, Wellfound, Indeed, LinkedIn, Naukri, Glassdoor, SimplyHired.
+Search Agent — scrapes job listings from 8 portals:
+  Internshala, Wellfound, Indeed, LinkedIn, Naukri, Glassdoor, SimplyHired, Unstop.
 Uses requests + BeautifulSoup. Generates SHA256 hash for deduplication.
-Also scrapes recruiter/HR email addresses from individual job pages.
+Also scrapes recruiter/HR email addresses and job descriptions from individual job pages.
+Features retry logic with exponential backoff for reliability.
 """
 
 import hashlib
 import logging
 import re
+import time
+import random
 from datetime import date
 from urllib.parse import quote_plus
 import concurrent.futures
@@ -27,7 +30,43 @@ HEADERS = {
     )
 }
 TIMEOUT = 12
-TIMEOUT_EMAIL_SCRAPE = 4
+TIMEOUT_EMAIL_SCRAPE = 6
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 1.5  # seconds
+
+
+def _retry_request(url: str, headers: dict = None, timeout: int = TIMEOUT) -> requests.Response | None:
+    """Make a GET request with exponential backoff retry logic."""
+    hdrs = headers or HEADERS
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Random delay to avoid IP bans (0.5–2s between requests)
+            if attempt > 0:
+                delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0.3, 1.0)
+                logger.debug(f"Retry {attempt+1}/{MAX_RETRIES} after {delay:.1f}s for {url}")
+                time.sleep(delay)
+
+            resp = requests.get(url, headers=hdrs, timeout=timeout)
+
+            # Retry on rate-limit or server errors
+            if resp.status_code in (429, 503, 502, 500):
+                logger.warning(f"HTTP {resp.status_code} from {url}, retrying...")
+                continue
+
+            resp.raise_for_status()
+            return resp
+
+        except requests.exceptions.Timeout:
+            logger.debug(f"Timeout on attempt {attempt+1} for {url}")
+            continue
+        except requests.exceptions.ConnectionError:
+            logger.debug(f"Connection error on attempt {attempt+1} for {url}")
+            continue
+        except Exception as e:
+            logger.debug(f"Request error on attempt {attempt+1} for {url}: {e}")
+            if attempt == MAX_RETRIES - 1:
+                return None
+    return None
 
 
 def _generate_hash(company: str, role: str, link: str) -> str:
@@ -42,7 +81,7 @@ def _job_exists(db: Session, job_hash: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Recruiter email scraper — visits individual job pages
+# Recruiter email + job description scraper
 # ---------------------------------------------------------------------------
 GENERIC_EMAILS = {
     "noreply", "no-reply", "info", "support", "admin", "contact",
@@ -86,38 +125,78 @@ def _extract_emails_from_text(text: str) -> list[str]:
     return list(dict.fromkeys(valid))  # dedupe preserving order
 
 
-def _scrape_recruiter_email(job_url: str, source: str) -> str:
+def _extract_job_description(soup: BeautifulSoup) -> str:
     """
-    Visit a job detail page and try to extract a recruiter/HR email.
-    Returns the best email found, or empty string.
+    Extract structured job description text from a detail page.
+    Looks for common JD container selectors across portals.
+    """
+    # Common selectors for job description sections
+    jd_selectors = [
+        ".job-description", ".jobDescriptionText", ".description__text",
+        "#job-details", ".show-more-less-html__markup", ".job_description",
+        "[data-testid='jobDescriptionText']", ".styles_JDC__dang-inner-html__h0K4t",
+        ".detail-row", ".internship_details", ".text-description",
+        ".job-desc", ".jd-desc", ".about_company", "#jobDescriptionText",
+        "section.description", ".job-detail-description",
+    ]
+
+    for selector in jd_selectors:
+        el = soup.select_one(selector)
+        if el:
+            text = el.get_text(separator=" ", strip=True)
+            if len(text) > 50:  # Only accept meaningful descriptions
+                # Limit to 2000 chars to keep DB manageable
+                return text[:2000]
+
+    # Fallback: grab the largest text block from the page
+    paragraphs = soup.find_all("p")
+    if paragraphs:
+        longest = max(paragraphs, key=lambda p: len(p.get_text(strip=True)))
+        text = longest.get_text(strip=True)
+        if len(text) > 50:
+            return text[:2000]
+
+    return ""
+
+
+def _scrape_job_detail(job_url: str, source: str) -> tuple[str, str]:
+    """
+    Visit a job detail page and extract recruiter email + job description.
+    Returns (recruiter_email, job_description).
     """
     if not job_url or not job_url.startswith("http"):
-        return ""
+        return "", ""
 
     try:
-        resp = requests.get(job_url, headers=HEADERS, timeout=TIMEOUT_EMAIL_SCRAPE)
-        resp.raise_for_status()
+        resp = _retry_request(job_url, timeout=TIMEOUT_EMAIL_SCRAPE)
+        if not resp:
+            return "", ""
+
         soup = BeautifulSoup(resp.text, "html.parser")
         page_text = soup.get_text(separator=" ")
 
+        # Extract emails
         emails = _extract_emails_from_text(page_text)
-
-        # Also check mailto: links which are the most reliable source
         for a_tag in soup.select("a[href^='mailto:']"):
             href = a_tag.get("href", "")
             if href.startswith("mailto:"):
                 mailto_email = href[7:].split("?")[0].strip().lower()
                 if mailto_email and mailto_email not in emails:
-                    emails.insert(0, mailto_email)  # prioritize mailto
+                    emails.insert(0, mailto_email)
 
-        if emails:
-            logger.info(f"Found recruiter email(s) on {source}: {emails[0]}")
-            return emails[0]
+        recruiter_email = emails[0] if emails else ""
+        if recruiter_email:
+            logger.info(f"Found recruiter email on {source}: {recruiter_email}")
+
+        # Extract job description
+        job_description = _extract_job_description(soup)
+
+        return recruiter_email, job_description
 
     except Exception as e:
-        logger.debug(f"Failed to scrape email from {job_url}: {e}")
+        logger.debug(f"Failed to scrape detail from {job_url}: {e}")
 
-    return ""
+    return "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +209,9 @@ def _scrape_internshala(keywords: list[str]) -> list[dict]:
     url = f"https://internshala.com/internships/{query}-internship"
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
+        resp = _retry_request(url)
+        if not resp:
+            return jobs
         soup = BeautifulSoup(resp.text, "html.parser")
 
         listings = soup.select(".individual_internship, .internship_meta, .container-fluid.individual_internship")[:15]
@@ -153,7 +233,6 @@ def _scrape_internshala(keywords: list[str]) -> list[dict]:
                     href = link_tag["href"]
                     link = href if href.startswith("http") else f"https://internshala.com{href}"
 
-                # Try to get recruiter email from the listing itself
                 recruiter_email = ""
                 email_tags = listing.select("a[href^='mailto:']")
                 if email_tags:
@@ -189,8 +268,9 @@ def _scrape_wellfound(keywords: list[str]) -> list[dict]:
     url = f"https://wellfound.com/role/r/{query}"
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
+        resp = _retry_request(url)
+        if not resp:
+            return jobs
         soup = BeautifulSoup(resp.text, "html.parser")
 
         listings = soup.select("[data-test='StartupResult'], .styles_result__rPRNG, .styles_component__FLWLJ")[:15]
@@ -242,8 +322,9 @@ def _scrape_indeed(keywords: list[str]) -> list[dict]:
     url = f"https://www.indeed.com/jobs?q={query}&l=India"
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
+        resp = _retry_request(url)
+        if not resp:
+            return jobs
         soup = BeautifulSoup(resp.text, "html.parser")
 
         cards = soup.select(".job_seen_beacon, .resultContent, .tapItem, .result")[:15]
@@ -295,8 +376,9 @@ def _scrape_linkedin(keywords: list[str]) -> list[dict]:
     url = f"https://www.linkedin.com/jobs/search/?keywords={query}&location=India&f_TPR=r2592000"
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
+        resp = _retry_request(url)
+        if not resp:
+            return jobs
         soup = BeautifulSoup(resp.text, "html.parser")
 
         cards = soup.select(".base-card, .job-search-card, .base-search-card")[:15]
@@ -347,8 +429,9 @@ def _scrape_naukri(keywords: list[str]) -> list[dict]:
     naukri_headers = {**HEADERS, "Accept-Language": "en-US,en;q=0.9"}
 
     try:
-        resp = requests.get(url, headers=naukri_headers, timeout=TIMEOUT)
-        resp.raise_for_status()
+        resp = _retry_request(url, headers=naukri_headers)
+        if not resp:
+            return jobs
         soup = BeautifulSoup(resp.text, "html.parser")
 
         cards = soup.select(".srp-jobtuple-wrapper, article.jobTuple, .jobTupleHeader, .cust-job-tuple")[:15]
@@ -399,8 +482,9 @@ def _scrape_glassdoor(keywords: list[str]) -> list[dict]:
     url = f"https://www.glassdoor.co.in/Job/india-{'-'.join(keywords[:3])}-jobs-SRCH_IL.0,5_IN115_KO6,{6+len('-'.join(keywords[:3]))}.htm"
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
+        resp = _retry_request(url)
+        if not resp:
+            return jobs
         soup = BeautifulSoup(resp.text, "html.parser")
 
         cards = soup.select(".react-job-listing, li[data-test='jobListing'], .JobCard_jobCardContainer__arkaK")[:15]
@@ -452,8 +536,9 @@ def _scrape_simplyhired(keywords: list[str]) -> list[dict]:
     url = f"https://www.simplyhired.co.in/search?q={query}&l=India"
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
+        resp = _retry_request(url)
+        if not resp:
+            return jobs
         soup = BeautifulSoup(resp.text, "html.parser")
 
         cards = soup.select(".SerpJob, article[data-testid='searchSerpJob'], .css-0")[:15]
@@ -491,6 +576,66 @@ def _scrape_simplyhired(keywords: list[str]) -> list[dict]:
                 continue
     except Exception as e:
         logger.warning(f"SimplyHired scrape failed: {e}")
+
+    return jobs
+
+
+# ---------------------------------------------------------------------------
+# 8. Unstop scraper
+# ---------------------------------------------------------------------------
+def _scrape_unstop(keywords: list[str]) -> list[dict]:
+    """Scrape jobs and internships from Unstop.com using their public API."""
+    jobs = []
+    query = quote_plus(" ".join(keywords[:3]))
+
+    # We search both jobs and internships
+    for category in ["jobs", "internships"]:
+        url = f"https://unstop.com/api/public/opportunity/search-result?opportunity={category}&searchTerm={query}&per_page=15&page=1"
+
+        try:
+            # We use custom headers for API access
+            api_headers = {**HEADERS, "Accept": "application/json"}
+            resp = _retry_request(url, headers=api_headers)
+            if not resp:
+                continue
+
+            data = resp.json()
+            items = data.get("data", {}).get("data", [])
+
+            for item in items:
+                try:
+                    company = item.get("organisation", {}).get("name", "Unknown")
+                    role = item.get("title", "Role")
+
+                    job_detail = item.get("jobDetail", {})
+                    locations = job_detail.get("locations", [])
+                    location = ", ".join(locations) if locations else "Remote"
+
+                    # Stipend handling
+                    stipend = job_detail.get("salary_text", "Not disclosed")
+                    if not stipend or stipend == "null":
+                        stipend = "Not disclosed"
+
+                    # Link
+                    link = item.get("seo_url")
+                    if not link:
+                        link = f"https://unstop.com/{item.get('public_url')}"
+
+                    jobs.append({
+                        "company": company,
+                        "role": role,
+                        "location": location,
+                        "stipend": stipend,
+                        "required_skills": ", ".join(keywords),
+                        "deadline": item.get("reg_end_date", item.get("end_date", "N/A")),
+                        "link": link,
+                        "source": "Unstop",
+                        "recruiter_email": "",
+                    })
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"Unstop {category} scrape failed: {e}")
 
     return jobs
 
@@ -540,6 +685,7 @@ def search_jobs(profile: dict, db: Session) -> list[dict]:
     Search all 7 sources for jobs matching the user's profile.
     Builds smart search keywords from roles and domains.
     Deduplicates against the database. Returns newly added jobs.
+    Scrapes real job descriptions and recruiter emails from detail pages.
     """
     keywords = _build_search_keywords(profile)
     logger.info(f"Search keywords from resume: {keywords}")
@@ -555,6 +701,7 @@ def search_jobs(profile: dict, db: Session) -> list[dict]:
         ("Naukri", _scrape_naukri),
         ("Glassdoor", _scrape_glassdoor),
         ("SimplyHired", _scrape_simplyhired),
+        ("Unstop", _scrape_unstop),
     ]
 
     for name, scraper_fn in scrapers:
@@ -577,27 +724,34 @@ def search_jobs(profile: dict, db: Session) -> list[dict]:
             continue
         new_jobs_to_scrape.append((raw, job_hash))
 
-    # Step 2: Concurrently scrape recruiter emails for the new jobs
-    def fetch_email(item):
+    # Step 2: Concurrently scrape recruiter emails + job descriptions for new jobs
+    def fetch_detail(item):
         raw_job, j_hash = item
         rec_email = raw_job.get("recruiter_email", "")
-        if not rec_email and raw_job.get("link"):
-            rec_email = _scrape_recruiter_email(raw_job["link"], raw_job.get("source", "Unknown"))
-        return raw_job, j_hash, rec_email
+        job_desc = ""
+        if raw_job.get("link"):
+            scraped_email, scraped_desc = _scrape_job_detail(
+                raw_job["link"], raw_job.get("source", "Unknown")
+            )
+            if not rec_email:
+                rec_email = scraped_email
+            job_desc = scraped_desc
+        return raw_job, j_hash, rec_email, job_desc
 
     new_jobs = []
-    logger.info(f"Concurrently scraping recruiter emails for {len(new_jobs_to_scrape)} new jobs...")
+    logger.info(f"Concurrently scraping details for {len(new_jobs_to_scrape)} new jobs...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(fetch_email, new_jobs_to_scrape))
+        results = list(executor.map(fetch_detail, new_jobs_to_scrape))
 
     # Step 3: Save them to DB
-    for raw, job_hash, recruiter_email in results:
+    for raw, job_hash, recruiter_email, job_description in results:
         job = Job(
             company=raw["company"],
             role=raw["role"],
             location=raw["location"],
             stipend=raw["stipend"],
             required_skills=raw["required_skills"],
+            job_description=job_description,
             deadline=raw.get("deadline", "N/A"),
             link=raw.get("link", ""),
             confidence_score=0.0,

@@ -19,10 +19,16 @@ export async function runSearch() {
     return response.data;
 }
 
-export async function getJobs(category = null) {
-    const params = {};
+export async function getJobs(category = null, page = 1, perPage = 50, bookmarked = null) {
+    const params = { page, per_page: perPage };
     if (category) params.category = category;
+    if (bookmarked !== null) params.bookmarked = bookmarked;
     const response = await api.get('/jobs', { params });
+    return response.data;
+}
+
+export async function getJobStats() {
+    const response = await api.get('/job-stats');
     return response.data;
 }
 
@@ -53,4 +59,33 @@ export async function updateRecruiterEmail(jobId, email) {
         params: { email },
     });
     return response.data;
+}
+
+export async function toggleBookmark(jobId) {
+    const response = await api.put(`/toggle-bookmark/${jobId}`);
+    return response.data;
+}
+
+export async function archiveJob(jobId) {
+    const response = await api.put(`/archive-job/${jobId}`);
+    return response.data;
+}
+
+export async function deleteJob(jobId) {
+    const response = await api.delete(`/delete-job/${jobId}`);
+    return response.data;
+}
+
+export async function getStatusHistory(jobId) {
+    const response = await api.get(`/status-history/${jobId}`);
+    return response.data;
+}
+
+export async function getEmailHistory(jobId) {
+    const response = await api.get(`/email-history/${jobId}`);
+    return response.data;
+}
+
+export function getExportUrl() {
+    return '/export-jobs';
 }

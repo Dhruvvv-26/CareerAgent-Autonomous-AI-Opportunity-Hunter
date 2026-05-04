@@ -1,96 +1,50 @@
 import { useState } from 'react';
 import { uploadResume } from '../api/api';
-import ResumeSummaryCard from './ResumeSummaryCard';
 
-export default function ResumeUpload() {
+export default function ResumeUpload({ onUploadSuccess }) {
     const [file, setFile] = useState(null);
-    const [profile, setProfile] = useState(null);
     const [loading, setLoading] = useState(false);
-    const [error, setError] = useState('');
-    const [dragOver, setDragOver] = useState(false);
+    const [msg, setMsg] = useState('');
+
+    const handleFileChange = (e) => {
+        setFile(e.target.files[0]);
+    };
 
     const handleUpload = async () => {
         if (!file) return;
         setLoading(true);
-        setError('');
+        setMsg('');
         try {
-            const data = await uploadResume(file);
-            if (data.error) {
-                setError(data.error);
-            } else {
-                setProfile(data.profile);
-            }
+            await uploadResume(file);
+            setMsg('Resume updated successfully!');
+            if (onUploadSuccess) onUploadSuccess();
         } catch {
-            setError('Upload failed. Make sure the backend is running.');
+            setMsg('Upload failed.');
         } finally {
             setLoading(false);
         }
     };
 
-    const handleDrop = (e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const dropped = e.dataTransfer.files[0];
-        if (dropped && dropped.name.toLowerCase().endsWith('.pdf')) {
-            setFile(dropped);
-            setError('');
-        } else {
-            setError('Only PDF files are accepted.');
-        }
-    };
-
     return (
-        <div className="section">
-            <div className="card">
-                <h2 className="card-title">Upload Resume</h2>
-                <p className="card-subtitle">
-                    Upload your PDF resume to extract skills and personalize opportunity matching.
-                </p>
-
-                <div
-                    className={`upload-zone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
-                    onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={handleDrop}
-                    onClick={() => document.getElementById('resume-input').click()}
-                >
-                    <input
-                        id="resume-input"
-                        type="file"
-                        accept=".pdf"
-                        style={{ display: 'none' }}
-                        onChange={(e) => { setFile(e.target.files[0]); setError(''); }}
-                    />
-                    {file ? (
-                        <div className="file-info">
-                            <span>✓</span>
-                            <span className="file-name">{file.name}</span>
-                            <span className="file-size">{(file.size / 1024).toFixed(1)} KB</span>
-                        </div>
-                    ) : (
-                        <>
-                            <span className="upload-icon">↑</span>
-                            <p className="upload-text">Drag & Drop PDF or Click to Upload</p>
-                        </>
-                    )}
+        <div className="job-card" style={{ marginBottom: '32px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                    <h3 style={{ fontSize: '1.1rem', marginBottom: '4px' }}>Targeting & Profile</h3>
+                    <p style={{ color: '#7d7d7d', fontSize: '0.85rem' }}>Upload your latest resume to update search keywords.</p>
                 </div>
-
-                <button
-                    className="upload-btn"
-                    onClick={handleUpload}
-                    disabled={loading || !file}
-                >
-                    {loading ? (
-                        <><span className="spinner"></span> Analyzing…</>
-                    ) : (
-                        'Extract Skills'
-                    )}
-                </button>
-
-                {error && <div className="error-msg">{error}</div>}
-
-                {profile && <ResumeSummaryCard profile={profile} />}
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                    <input 
+                        type="file" 
+                        accept=".pdf" 
+                        onChange={handleFileChange} 
+                        style={{ fontSize: '0.8rem' }}
+                    />
+                    <button className="btn btn-accent" onClick={handleUpload} disabled={loading || !file}>
+                        {loading ? 'Processing...' : 'Update Resume'}
+                    </button>
+                </div>
             </div>
+            {msg && <div style={{ marginTop: '12px', fontSize: '0.85rem', color: '#22c55e' }}>{msg}</div>}
         </div>
     );
 }

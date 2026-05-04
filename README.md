@@ -1,6 +1,6 @@
 # 🚀 CareerAgent — Autonomous AI Opportunity Hunter
 
-> A multi-agent AI system that autonomously discovers job opportunities across 7 portals, matches them against your resume, scores and categorizes them, and sends personalized cold emails — all running **100% locally** with **zero paid APIs**.
+> A multi-agent AI system that autonomously discovers job opportunities across 7 portals, matches them against your resume using **TF-IDF intelligence**, scores and categorizes them, tracks your application history, and sends personalized cold emails — all running **100% locally** with **zero paid APIs**.
 
 **Built by [Dhruv Gupta](https://github.com/Dhruvvv-26)**
 
@@ -8,14 +8,22 @@
 
 ## ✨ Features
 
-- **Multi-Portal Job Scraping** — Searches 7 portals and concurrently extracts open Recruiter/HR emails
+- **Multi-Portal Job Scraping** — Searches 7 portals with retry logic & exponential backoff, extracts real job descriptions and recruiter/HR emails
 - **Resume Intelligence** — Extracts skills, domains, and contact info (phone/email/LinkedIn) from your PDF resume
-- **Smart Scoring** — Computes confidence scores using skill matching, domain overlap, and experience fit
-- **Interactive Email Outreach** — Generate, preview, edit, and send polished cold emails with a single click
+- **TF-IDF Smart Scoring** — Computes confidence scores using TF-IDF + cosine similarity for fuzzy skill matching, with synonym normalization
+- **Interactive Email Outreach** — Generate, preview, edit, and send polished cold emails with a single click; full email send history logging
 - **Auto Categorization** — Jobs classified into High Priority, Good Match, and Stretch tiers
 - **Daily Automation** — APScheduler runs the full pipeline on a configurable daily schedule
 - **Gmail API Integration** — Dispatches cold emails with your custom resume attached via OAuth Desktop
 - **Premium Dark Dashboard** — Clean, minimal React frontend with filters, search, and status tracking
+- **📊 Analytics Dashboard** — Interactive pie, bar, and line charts (Recharts) for source distribution, category breakdown, and daily trends
+- **⭐ Bookmarks & Favorites** — Star important jobs for quick access with a dedicated filter
+- **📥 CSV Export** — Export your entire job list as a downloadable CSV file
+- **🗑️ Archive & Delete** — Soft-delete jobs to keep your dashboard clean, restore anytime
+- **📋 Application Tracker** — Full status change history with timeline view per job
+- **📨 Email History** — Track every cold email sent with recipient, subject, and timestamp
+- **🔄 Pagination** — Server-side pagination for handling large job listings
+- **💾 Persistent Profile** — Resume summary persists across page refreshes
 
 ---
 
@@ -30,8 +38,8 @@ React + Vite Frontend  →  FastAPI Backend  →  Multi-Agent Layer  →  SQLite
 | Agent | Responsibility |
 |-------|---------------|
 | **Resume Agent** | Parses PDF resumes, extracts skills, domains, experience level |
-| **Search Agent** | Scrapes 7 job portals with deduplication via SHA-256 hashing |
-| **Scoring Agent** | Computes confidence + reputation scores, categorizes jobs |
+| **Search Agent** | Scrapes 7 job portals with deduplication via SHA-256 hashing, retry logic, and real JD extraction |
+| **Scoring Agent** | Computes confidence + reputation scores using TF-IDF matching, categorizes jobs |
 | **Email Agent** | Sends personalized cold emails via Gmail API (1/day) |
 
 ---
@@ -39,12 +47,12 @@ React + Vite Frontend  →  FastAPI Backend  →  Multi-Agent Layer  →  SQLite
 ## 📦 Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Frontend | React, Vite, Axios, Plain CSS |
+|-------|-----------| 
+| Frontend | React, Vite, Axios, Recharts, Plain CSS |
 | Backend | FastAPI, Uvicorn, SQLAlchemy |
-| Scraping | Requests, BeautifulSoup4 |
+| Scraping | Requests, BeautifulSoup4 (with retry/backoff) |
 | Database | SQLite |
-| NLP | PyMuPDF, Keyword Matching |
+| NLP | PyMuPDF, scikit-learn (TF-IDF), Keyword Matching |
 | Email | Gmail API (OAuth 2.0 Desktop) |
 | Scheduling | APScheduler |
 
@@ -142,10 +150,19 @@ Open: [http://localhost:5173](http://localhost:5173)
 |--------|----------|-------------|
 | `POST` | `/upload-resume` | Upload PDF resume, extract skills and profile |
 | `POST` | `/run-search` | Trigger job search + scoring pipeline across 7 portals |
-| `GET` | `/jobs` | List all jobs (optional `?category=` filter) |
-| `GET` | `/job-stats` | Aggregate counts by category and source |
+| `GET` | `/jobs` | List jobs (supports `?category=`, `?page=`, `?per_page=`, `?bookmarked=`) |
+| `GET` | `/job-stats` | Aggregate counts by category, source, and daily trend |
 | `GET` | `/profile` | Retrieve current resume profile |
-| `PUT` | `/update-status/{job_id}` | Update job status (`?status=Applied`) |
+| `PUT` | `/update-status/{job_id}` | Update job status (records in history) |
+| `PUT` | `/update-recruiter-email/{job_id}` | Manually set recruiter email |
+| `PUT` | `/toggle-bookmark/{job_id}` | Toggle bookmark on a job |
+| `PUT` | `/archive-job/{job_id}` | Archive/restore a job |
+| `DELETE` | `/delete-job/{job_id}` | Permanently delete a job |
+| `GET` | `/status-history/{job_id}` | Get status change timeline |
+| `GET` | `/email-history/{job_id}` | Get email send history |
+| `GET` | `/export-jobs` | Download all jobs as CSV |
+| `GET` | `/email-preview/{job_id}` | Generate email preview for editing |
+| `POST` | `/send-email` | Send cold email with optional overrides |
 
 ---
 
@@ -153,14 +170,14 @@ Open: [http://localhost:5173](http://localhost:5173)
 
 | Metric | Formula |
 |--------|---------|
-| **Skill Match** | `(common_skills / required_skills) × 100` |
+| **Skill Match** | TF-IDF cosine similarity (60%) + exact keyword match (40%) |
 | **Confidence** | `0.5 × skill_match + 0.3 × domain_match + 0.2 × experience_match` |
 | **Reputation** | IIT/ISRO/FAANG = 95, MNC = 85, Funded Startup = 75, Unknown = 60 |
 
 ### Categories
 
 | Category | Confidence Range |
-|----------|-----------------|
+|----------|-----------------| 
 | 🟢 High Priority | > 80% |
 | 🔵 Good Match | 60–80% |
 | 🟡 Stretch | < 60% |
@@ -187,17 +204,17 @@ career_agent/
 │   ├── requirements.txt
 │   ├── agents/
 │   │   ├── resume_agent.py          # PDF parsing + skill extraction
-│   │   ├── search_agent.py          # 7-portal web scraping + dedup
-│   │   ├── scoring_agent.py         # Job scoring + categorization
+│   │   ├── search_agent.py          # 7-portal web scraping + retry + JD extraction
+│   │   ├── scoring_agent.py         # TF-IDF scoring + categorization
 │   │   └── email_agent.py           # Gmail cold email sender
 │   ├── database/
 │   │   ├── db.py                    # SQLAlchemy engine + session
-│   │   └── models.py               # Job + ResumeProfile models
+│   │   └── models.py               # Job, ResumeProfile, StatusHistory, EmailLog
 │   ├── routers/
 │   │   ├── resume_router.py         # /upload-resume endpoint
-│   │   └── jobs_router.py           # /jobs, /run-search, /job-stats
+│   │   └── jobs_router.py           # All job, analytics, export, bookmark endpoints
 │   ├── utils/
-│   │   ├── skill_matcher.py         # Skill overlap calculator
+│   │   ├── skill_matcher.py         # TF-IDF + cosine similarity matcher
 │   │   ├── reputation_score.py      # Company reputation scorer
 │   │   └── confidence_calculator.py # Weighted confidence formula
 │   └── scheduler/
@@ -211,16 +228,18 @@ career_agent/
 │       ├── main.jsx                 # Entry point
 │       ├── index.css                # Complete design system
 │       ├── api/
-│       │   └── api.js               # Axios API wrapper
+│       │   └── api.js               # Axios API wrapper (all endpoints)
 │       ├── components/
 │           ├── Navbar.jsx           # Top navigation bar
-│           ├── ResumeUpload.jsx     # Upload + drag & drop
+│           ├── ResumeUpload.jsx     # Upload + drag & drop + persistent profile
 │           ├── ResumeSummaryCard.jsx # Skills, domains, experience
-│           ├── Dashboard.jsx        # Dashboard container
+│           ├── Dashboard.jsx        # Dashboard container + pagination + export
+│           ├── AnalyticsPanel.jsx   # Charts (pie, bar, line) with Recharts
 │           ├── CategoryTabs.jsx     # Category filter tabs
 │           ├── FilterBar.jsx        # Dropdown + search
 │           ├── JobTable.jsx         # Job listing table
-│           ├── JobRow.jsx           # Individual job row
+│           ├── JobRow.jsx           # Job row + bookmark + archive + history
+│           ├── Pagination.jsx       # Page navigator
 │           ├── StatusBadge.jsx      # Colored status badges
 │           ├── EmailPreviewModal.jsx # Editable email composer modal
 │           └── EmptyState.jsx       # Empty state UI
@@ -236,6 +255,7 @@ career_agent/
 - `credentials.json` and `token.json` are gitignored
 - No hardcoded API keys or secrets
 - OAuth tokens stored locally only
+- CORS restricted to localhost origins
 - SQLite database gitignored
 
 ---
